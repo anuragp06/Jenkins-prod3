@@ -1,0 +1,24 @@
+name: runSmokeTests
+description: Run smoke tests by curling a URL with retries and sleep between attempts
+inputs:
+  url:
+    description: URL to test
+    required: true
+    default: ''
+  retries:
+    description: Number of retries
+    required: false
+    default: '4'
+  sleepSeconds:
+    description: Seconds to sleep between retries
+    required: false
+    default: '5'
+runs:
+  using: composite
+  steps:
+  - name: Check url input
+    run: "if [ -z \"${{ inputs.url }}\" ]; then\n  echo \"url is required\"\n  exit 1\nfi\n"
+    shell: bash
+  - name: Run smoke tests with retries
+    run: "set -euo pipefail\nretries=${{ inputs.retries }}\nsleep_seconds=${{ inputs.sleepSeconds }}\ncount=0\nwhile [ $count -lt \"$retries\" ]; do\n  if curl -fsS --max-time 15 \"${{ inputs.url }}\"; then\n    exit 0\n  fi\n  count=$((count + 1))\n  if [ $count -lt \"$retries\" ]; then\n    echo \"Attempt $count failed, sleeping $sleep_seconds seconds before retry\"\n    sleep \"$sleep_seconds\"\n  else\n    echo \"All $retries attempts failed\"\n    exit 1\n  fi\ndone\n"
+    shell: bash
