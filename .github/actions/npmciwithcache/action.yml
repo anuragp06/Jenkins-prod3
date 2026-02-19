@@ -1,0 +1,30 @@
+name: npmCiWithCache
+description: Run npm ci with cache and optional strict peer dependencies
+inputs:
+  workspace:
+    description: Directory to run npm ci in
+    required: false
+    default: .
+  cacheDir:
+    description: Directory to use for npm cache
+    required: false
+    default: .npm
+  strictPeerDeps:
+    description: Use strict peer dependencies
+    required: false
+    default: 'false'
+  retries:
+    description: Number of retries for npm ci
+    required: false
+    default: '2'
+runs:
+  using: composite
+  steps:
+  - name: Create cache directory
+    run: 'mkdir -p "${{ inputs.workspace }}/${{ inputs.cacheDir }}"
+
+      '
+    shell: bash
+  - name: Run npm ci with cache
+    run: "set -euo pipefail\ncd \"${{ inputs.workspace }}\"\nattempt=0\nuntil [ $attempt -ge ${{ inputs.retries }} ]\ndo\n  if [ \"${{ inputs.strictPeerDeps }}\" = \"true\" ]; then\n    npm ci --cache \"${{ inputs.cacheDir }}\" --no-audit\n  else\n    npm ci --cache \"${{ inputs.cacheDir }}\" --no-audit --legacy-peer-deps\n  fi && break\n  attempt=$((attempt+1))\n  echo \"Retrying npm ci ($attempt/${{ inputs.retries }})\"\ndone\n"
+    shell: bash
