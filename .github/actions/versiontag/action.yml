@@ -1,0 +1,41 @@
+name: versionTag
+description: Generate a version tag from branch, commit, and build number
+inputs:
+  branch:
+    description: Branch name
+    required: false
+    default: detached
+  commit:
+    description: Commit hash
+    required: false
+    default: local
+  buildNumber:
+    description: Build number
+    required: false
+    default: '0'
+runs:
+  using: composite
+  steps:
+  - name: Generate safe branch name
+    run: 'safe_branch=$(echo "${{ inputs.branch }}" | tr ''[:upper:]'' ''[:lower:]'' | sed -E ''s/[^a-z0-9]+/-/g'' | sed -E ''s/(^-+|-+$)//g'')
+
+      echo "SAFE_BRANCH=$safe_branch" >> $GITHUB_ENV
+
+      '
+    shell: bash
+  - name: Get short commit
+    run: 'short_commit=$(echo "${{ inputs.commit }}" | cut -c1-8)
+
+      echo "SHORT_COMMIT=$short_commit" >> $GITHUB_ENV
+
+      '
+    shell: bash
+  - name: Output version tag
+    run: 'version_tag="${SAFE_BRANCH}-${SHORT_COMMIT}-${{ inputs.buildNumber }}"
+
+      echo "Version tag: $version_tag"
+
+      echo "version_tag=$version_tag" >> $GITHUB_OUTPUT
+
+      '
+    shell: bash
