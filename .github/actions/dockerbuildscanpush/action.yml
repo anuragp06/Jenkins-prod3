@@ -1,0 +1,87 @@
+name: dockerBuildScanPush
+description: Build, scan, and push a Docker image with optional Trivy scanning
+inputs:
+  imageRepository:
+    description: Docker image repository (e.g. myorg/myapp)
+    required: true
+  registryHost:
+    description: Docker registry host (e.g. ghcr.io)
+    required: true
+  registryUsername:
+    description: Docker registry username
+    required: true
+  registryPassword:
+    description: Docker registry password
+    required: true
+  dockerfile:
+    description: Path to Dockerfile
+    required: false
+    default: Dockerfile
+  contextDir:
+    description: Docker build context directory
+    required: false
+    default: .
+  tags:
+    description: Comma-separated list of tags (e.g. 1.0.0,latest)
+    required: false
+    default: latest
+  buildArgs:
+    description: Build arguments as comma-separated key=value pairs (e.g. FOO=bar,BAZ=qux)
+    required: false
+    default: ''
+  enableTrivy:
+    description: Enable Trivy scan (true/false)
+    required: false
+    default: 'false'
+  failOnHighOrCritical:
+    description: Fail build on HIGH or CRITICAL vulnerabilities (true/false)
+    required: false
+    default: 'true'
+runs:
+  using: composite
+  steps:
+  - name: Validate required inputs
+    run: "set -euo pipefail\nif [ -z \"${{ inputs.imageRepository }}\" ]; then\n  echo \"dockerBuildScanPush: missing required input imageRepository\"\n  exit 1\nfi\nif [ -z \"${{ inputs.registryHost }}\" ]; then\n  echo \"dockerBuildScanPush: missing required input registryHost\"\n  exit 1\nfi\nif [ -z \"${{ inputs.registryUsername }}\" ]; then\n  echo \"dockerBuildScanPush: missing required input registryUsername\"\n  exit 1\nfi\nif [ -z \"${{ inputs.registryPassword }}\" ]; then\n  echo \"dockerBuildScanPush: missing required input registryPassword\"\n  exit 1\nfi\n"
+    shell: bash
+  - name: Parse tags and build args
+    id: parse
+    run: "IFS=',' read -ra TAGS <<< \"${{ inputs.tags }}\"\nif [ \"${#TAGS[@]}\" -eq 0 ] || [ -z \"${TAGS[0]}\" ]; then\n  TAGS=(\"latest\")\nfi\necho \"primary_tag=${TAGS[0]}\" >> $GITHUB_OUTPUT\necho \"all_tags=${TAGS[*]}\" >> $GITHUB_OUTPUT\n\n# Parse build args\nBUILD_ARG_FLAGS=\"\"\nif [ -n \"${{ inputs.buildArgs }}\" ]; then\n  IFS=',' read -ra ARG_PAIRS <<< \"${{ inputs.buildArgs }}\"\n  for pair in \"${ARG_PAIRS[@]}\"; do\n    if [[ \"$pair\" == *=* ]]; then\n      BUILD_ARG_FLAGS+=\" --build-arg $pair\"\n    fi\n  done\nfi\necho \"build_arg_flags=${BUILD_ARG_FLAGS}\" >> $GITHUB_OUTPUT\n"
+    shell: bash
+  - name: Docker login
+    run: 'set -euo pipefail
+
+      echo "${{ inputs.registryPassword }}" | docker login ${{ inputs.registryHost }} -u "${{ inputs.registryUsername }}" --password-stdin
+
+      '
+    shell: bash
+  - name: Docker build image
+    run: 'set -euo pipefail
+
+      IMAGE="${{ inputs.imageRepository }}:${{ steps.parse.outputs.primary_tag }}"
+
+      docker build -f "${{ inputs.dockerfile }}" ${{ steps.parse.outputs.build_arg_flags }} -t "$IMAGE" "${{ inputs.contextDir }}"
+
+      echo "IMAGE_URI=$IMAGE" >> $GITHUB_ENV
+
+      '
+    shell: bash
+  - name: Trivy scan if enabled
+    run: "set -euo pipefail\nif [ \"${{ inputs.enableTrivy }}\" != \"true\" ]; then\n  echo \"dockerBuildScanPush: trivy scan disabled\"\n  exit 0\nfi\nif ! command -v trivy >/dev/null 2>&1; then\n  echo \"dockerBuildScanPush: trivy binary not found, skipping image scan\"\n  exit 0\nfi\nIMAGE=\"${{ inputs.imageRepository }}:${{ steps.parse.outputs.primary_tag }}\"\nEXIT_CODE=0\nif [ \"${{ inputs.failOnHighOrCritical }}\" = \"true\" ]; then\n  trivy image --severity HIGH,CRITICAL --exit-code 1 \"$IMAGE\" || EXIT_CODE=$?\nelse\n  trivy image --severity HIGH,CRITICAL --exit-code 0 \"$IMAGE\" || EXIT_CODE=$?\nfi\nif [ \"$EXIT_CODE\" -ne 0 ] && [ \"${{ inputs.failOnHighOrCritical }}\" != \"true\" ]; then\n  echo \"dockerBuildScanPush: vulnerabilities found for $IMAGE; build marked UNSTABLE\"\nfi\nexit $EXIT_CODE\n"
+    shell: bash
+  - name: Tag and push all tags
+    run: "set -euo pipefail\nIMAGE=\"${{ inputs.imageRepository }}:${{ steps.parse.outputs.primary_tag }}\"\nIFS=' ' read -ra TAGS <<< \"${{ steps.parse.outputs.all_tags }}\"\nfor idx in \"${!TAGS[@]}\"; do\n  TAG=\"${TAGS[$idx]}\"\n  IMAGE_REF=\"${{ inputs.imageRepository }}:${TAG}\"\n  if [ \"$idx\" -ne 0 ]; then\n    docker tag \"$IMAGE\" \"$IMAGE_REF\"\n  fi\n  docker push \"$IMAGE_REF\"\ndone\n"
+    shell: bash
+  - name: Docker logout
+    run: 'set +e
+
+      docker logout ${{ inputs.registryHost }}
+
+      '
+    shell: bash
+  - name: Output summary
+    run: 'set -euo pipefail
+
+      echo "dockerBuildScanPush: pushed $(echo "${{ steps.parse.outputs.all_tags }}" | wc -w) tag(s), primary image=${{ env.IMAGE_URI }}"
+
+      '
+    shell: bash
