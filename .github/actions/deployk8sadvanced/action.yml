@@ -1,0 +1,57 @@
+name: deployK8sAdvanced
+description: Advanced Kubernetes deployment strategies (rolling, bluegreen, canary)
+inputs:
+  environment:
+    description: Target environment name
+    required: true
+  namespace:
+    description: Kubernetes namespace
+    required: true
+  deployment:
+    description: Deployment base name
+    required: true
+  service:
+    description: Kubernetes service name (required for bluegreen)
+    required: false
+    default: ''
+  container:
+    description: Container name in deployment
+    required: true
+  image:
+    description: Image to deploy
+    required: true
+  strategy:
+    description: Deployment strategy (rolling, bluegreen, canary)
+    required: false
+    default: rolling
+  rolloutTimeout:
+    description: Rollout timeout (e.g. 300s)
+    required: false
+    default: 300s
+  kubeconfigCredentialId:
+    description: Kubeconfig credential ID
+    required: false
+    default: ''
+  replicas:
+    description: Total replicas for canary
+    required: false
+    default: '10'
+  canaryWeight:
+    description: Canary percentage (0-100)
+    required: false
+    default: '10'
+runs:
+  using: composite
+  steps:
+  - name: Validate required inputs
+    run: "missing=\"\"\nfor key in environment namespace deployment container image; do\n  if [ -z \"${{ inputs[$key] }}\" ]; then\n    echo \"deployK8sAdvanced: missing required input '$key'\"\n    missing=1\n  fi\ndone\nif [ -n \"$missing\" ]; then\n  exit 1\nfi\n"
+    shell: bash
+  - name: Set kubeconfig file path
+    run: "if [ -n \"${{ inputs.kubeconfigCredentialId }}\" ]; then\n  export KUBECONFIG_PATH=\"${{ inputs.kubeconfigCredentialId }}\"\nelse\n  export KUBECONFIG_PATH=\"kubeconfig-${{ inputs.environment }}\"\nfi\necho \"KUBECONFIG_PATH=$KUBECONFIG_PATH\" >> $GITHUB_ENV\n"
+    shell: bash
+  - name: Write kubeconfig to file
+    run: "if [ -n \"${{ inputs.kubeconfigCredentialId }}\" ]; then\n  echo \"${{ inputs.kubeconfigCredentialId }}\" > kubeconfig\nelse\n  echo \"${{ secrets['kubeconfig-'${{ inputs.environment }}] }}\" > kubeconfig\nfi\nchmod 600 kubeconfig\necho \"KUBECONFIG=$(pwd)/kubeconfig\" >> $GITHUB_ENV\n"
+    shell: bash
+  - name: Deploy with selected strategy
+    run: "set -euo pipefail\nSTRATEGY=\"${{ inputs.strategy }}\"\nSTRATEGY=$(echo \"$STRATEGY\" | tr '[:upper:]' '[:lower:]')\nNAMESPACE=\"${{ inputs.namespace }}\"\nDEPLOYMENT=\"${{ inputs.deployment }}\"\nSERVICE=\"${{ inputs.service }}\"\nCONTAINER=\"${{ inputs.container }}\"\nIMAGE=\"${{ inputs.image }}\"\nTIMEOUT=\"${{ inputs.rolloutTimeout }}\"\nREPLICAS=\"${{ inputs.replicas }}\"\nWEIGHT=\"${{ inputs.canaryWeight }}\"\nexport KUBECONFIG=\"$(pwd)/kubeconfig\"\n\nif [ \"$STRATEGY\" = \"rolling\" ]; then\n  echo \"deployK8sAdvanced: performing rolling deployment\"\n  kubectl -n \"$NAMESPACE\" set image deployment/\"$DEPLOYMENT\" \"$CONTAINER\"=\"$IMAGE\"\n  kubectl -n \"$NAMESPACE\" rollout status deployment/\"$DEPLOYMENT\" --timeout=\"$TIMEOUT\"\nelif [ \"$STRATEGY\" = \"bluegreen\" ]; then\n  if [ -z \"$SERVICE\" ]; then\n    echo \"deployK8sAdvanced: service input is required for bluegreen strategy\"\n    exit 1\n  fi\n  ACTIVE_COLOR=$(kubectl -n \"$NAMESPACE\" get svc \"$SERVICE\" -o jsonpath='{.spec.selector.track}' 2>/dev/null || true)\n  if [ -z \"$ACTIVE_COLOR\" ]; then\n    ACTIVE_COLOR=\"blue\"\n  fi\n  if [ \"$ACTIVE_COLOR\" = \"blue\" ]; then\n    INACTIVE_COLOR=\"green\"\n  else\n    INACTIVE_COLOR=\"blue\"\n  fi\n  TARGET_DEPLOYMENT=\"${DEPLOYMENT}-${INACTIVE_COLOR}\"\n  kubectl -n \"$NAMESPACE\" set image deployment/\"$TARGET_DEPLOYMENT\" \"$CONTAINER\"=\"$IMAGE\"\n  kubectl -n \"$NAMESPACE\" rollout status deployment/\"$TARGET_DEPLOYMENT\" --timeout=\"$TIMEOUT\"\n  kubectl -n \"$NAMESPACE\" patch svc \"$SERVICE\" -p \"{\\\"spec\\\":{\\\"selector\\\":{\\\"app\\\":\\\"$DEPLOYMENT\\\",\\\"track\\\":\\\"$INACTIVE_COLOR\\\"}}}\"\n  echo \"deployK8sAdvanced: switched service $SERVICE from $ACTIVE_COLOR to $INACTIVE_COLOR\"\nelif [ \"$STRATEGY\" = \"canary\" ]; then\n  TOTAL_REPLICAS=$REPLICAS\n  WEIGHT_INT=$WEIGHT\n  CANARY_REPLICAS=$(( (TOTAL_REPLICAS * WEIGHT_INT + 99) / 100 ))\n  if [ \"$CANARY_REPLICAS\" -lt 1 ]; then\n    CANARY_REPLICAS=1\n  fi\n  CANARY_DEPLOYMENT=\"${DEPLOYMENT}-canary\"\n  kubectl -n \"$NAMESPACE\" set image deployment/\"$CANARY_DEPLOYMENT\" \"$CONTAINER\"=\"$IMAGE\"\n  kubectl -n \"$NAMESPACE\" scale deployment/\"$CANARY_DEPLOYMENT\" --replicas=\"$CANARY_REPLICAS\"\n  kubectl -n \"$NAMESPACE\" rollout status deployment/\"$CANARY_DEPLOYMENT\" --timeout=\"$TIMEOUT\"\n  echo \"deployK8sAdvanced: canary set to $CANARY_REPLICAS/$TOTAL_REPLICAS replicas (~$WEIGHT%)\"\nelse\n  echo \"deployK8sAdvanced: unsupported strategy '$STRATEGY'\"\n  exit 1\nfi\n"
+    shell: bash
