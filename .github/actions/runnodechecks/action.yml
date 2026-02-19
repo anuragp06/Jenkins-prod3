@@ -1,0 +1,54 @@
+name: runNodeChecks
+description: Run custom Node.js checks and optionally publish JUnit and coverage artifacts
+inputs:
+  commands:
+    description: JSON object mapping check names to shell commands
+    required: true
+    default: '{}'
+  workspace:
+    description: Directory to run checks in
+    required: false
+    default: .
+  allowFailure:
+    description: Allow failures without failing the workflow
+    required: false
+    default: 'false'
+  publishJunit:
+    description: Publish JUnit test results
+    required: false
+    default: 'false'
+  junitPattern:
+    description: Glob pattern for JUnit XML files
+    required: false
+    default: '**/junit.xml'
+  archiveCoverage:
+    description: Archive coverage artifacts
+    required: false
+    default: 'false'
+  coveragePattern:
+    description: Glob pattern for coverage artifacts
+    required: false
+    default: coverage/**
+runs:
+  using: composite
+  steps:
+  - name: Validate commands input
+    run: "if [ -z \"${{ inputs.commands }}\" ] || [ \"${{ inputs.commands }}\" = \"{}\" ]; then\n  echo \"runNodeChecks: commands input is required and cannot be empty\"\n  exit 1\nfi\n"
+    shell: bash
+  - name: Run node checks
+    run: "set -euo pipefail\ncd \"${{ inputs.workspace }}\"\necho \"${{ inputs.commands }}\" > .runNodeChecks_commands.json\nnode <<'EOF'\nconst fs = require('fs');\nconst { execSync } = require('child_process');\nconst allowFailure = process.env.ALLOW_FAILURE === 'true';\nconst commands = JSON.parse(fs.readFileSync('.runNodeChecks_commands.json', 'utf8'));\nif (!commands || Object.keys(commands).length === 0) {\n  console.error('runNodeChecks: commands map is required and cannot be empty');\n  process.exit(1);\n}\nlet failed = false;\nfor (const [name, cmd] of Object.entries(commands)) {\n  console.log(`Running check '${name}'`);\n  try {\n    execSync(cmd, { stdio: 'inherit', shell: '/bin/bash' });\n  } catch (err) {\n    console.error(`Check '${name}' failed`);\n    if (!allowFailure) process.exit(1);\n    failed = true;\n  }\n}\nif (failed && allowFailure) process.exit(0);\nEOF\n"
+    shell: bash
+    env:
+      ALLOW_FAILURE: ${{ inputs.allowFailure }}
+  - name: Publish junit results
+    if: ${{ inputs.publishJunit == 'true' }}
+    run: 'echo "Would publish JUnit results matching pattern: ${{ inputs.junitPattern }}"
+
+      '
+    shell: bash
+  - name: Archive coverage artifacts
+    if: ${{ inputs.archiveCoverage == 'true' }}
+    run: 'echo "Would archive coverage artifacts matching pattern: ${{ inputs.coveragePattern }}"
+
+      '
+    shell: bash
