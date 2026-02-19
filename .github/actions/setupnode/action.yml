@@ -1,0 +1,42 @@
+name: setupNode
+description: Set up Node.js environment with optional npm registry and Corepack support
+inputs:
+  nodeTool:
+    description: Node.js version (e.g., 20)
+    required: false
+    default: 20
+  npmRegistry:
+    description: Optional npm registry URL
+    required: false
+    default: ''
+  enableCorepack:
+    description: Enable Corepack (true/false)
+    required: false
+    default: 'true'
+runs:
+  using: composite
+  steps:
+  - name: Set up Node
+    uses: actions/setup-node@v4
+    with:
+      node-version: ${{ inputs.nodeTool }}
+  - name: Show Node version
+    run: node --version
+    shell: bash
+  - name: Show npm version
+    run: npm --version
+    shell: bash
+  - name: Set npm registry if provided
+    if: ${{ inputs.npmRegistry != '' }}
+    run: npm config set registry ${{ inputs.npmRegistry }}
+    shell: bash
+  - name: Enable Corepack if requested
+    if: ${{ inputs.enableCorepack == 'true' }}
+    run: 'set +e
+
+      corepack enable
+
+      exit 0
+
+      '
+    shell: bash
