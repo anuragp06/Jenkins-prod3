@@ -1,0 +1,73 @@
+name: notifyBuild
+description: Send build status notification
+inputs:
+  status:
+    description: Build status (SUCCESS, FAILURE, UNSTABLE)
+    required: false
+    default: UNKNOWN
+  app_name:
+    description: Application name
+    required: false
+    default: unknown-app
+  channel:
+    description: Notification channel
+    required: false
+    default: '#build-notifications'
+  target_env:
+    description: Target environment
+    required: false
+    default: n/a
+  deploy_strategy:
+    description: Deploy strategy
+    required: false
+    default: n/a
+  image:
+    description: Built image reference
+    required: false
+    default: n/a
+  branch:
+    description: Branch name
+    required: false
+    default: n/a
+  build_url:
+    description: Build URL
+    required: false
+    default: n/a
+  duration:
+    description: Build duration text
+    required: false
+    default: n/a
+  slack_enabled:
+    description: Whether to send Slack notification
+    required: false
+    default: 'true'
+  slack_webhook:
+    description: Slack webhook URL
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+  - name: Build message
+    id: build_message
+    run: 'STATUS_UPPER="$(echo "${{ inputs.status }}" | tr ''[:lower:]'' ''[:upper:]'')"
+
+      MESSAGE="${{ inputs.app_name }} ${STATUS_UPPER} | env=${{ inputs.target_env }} | strategy=${{ inputs.deploy_strategy }} | branch=${{ inputs.branch }} | image=${{ inputs.image }} | duration=${{ inputs.duration }} | ${{ inputs.build_url }}"
+
+      echo "message=${MESSAGE}" >> "$GITHUB_OUTPUT"
+
+      '
+    shell: bash
+  - name: Print notification
+    run: 'echo "notifyBuild ${{ steps.build_message.outputs.message }}"
+
+      '
+    shell: bash
+  - name: Send Slack webhook
+    if: ${{ inputs.slack_enabled == 'true' && inputs.slack_webhook != '' }}
+    run: 'payload=$(printf ''{"text":"%s"}'' "${{ steps.build_message.outputs.message }}")
+
+      curl -X POST -H "Content-type: application/json" --data "$payload" "${{ inputs.slack_webhook }}"
+
+      '
+    shell: bash
