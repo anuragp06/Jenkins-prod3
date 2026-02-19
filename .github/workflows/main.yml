@@ -1,0 +1,187 @@
+name: Payments API CI/CD
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      TARGET_ENV:
+        description: Deployment environment
+        required: false
+        default: dev
+        type: string
+      DEPLOY_STRATEGY:
+        description: Deployment strategy
+        required: false
+        default: rolling
+        type: string
+      RUN_DEPLOY:
+        description: Deploy after successful image push
+        required: false
+        default: true
+        type: boolean
+      RUN_SECURITY_SCAN:
+        description: Run image security scan before push
+        required: false
+        default: true
+        type: boolean
+      CANARY_WEIGHT:
+        description: Canary traffic percent for canary strategy
+        required: false
+        default: "10"
+        type: string
+jobs:
+  payments-api-ci:
+    runs-on: ubuntu-latest
+    env:
+      APP_NAME: "payments-api"
+      IMAGE_REPOSITORY: "registry.example.com/platform/payments-api"
+      REGISTRY_HOST: "registry.example.com"
+      SLACK_CHANNEL: "#payments-ci"
+      NAMESPACE_BASE: "payments"
+      NODE_VERSION: "20"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Init Metadata
+        id: metadata
+        run: |
+          BUILD_TAG_SAFE="v${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:7}"
+          echo "BUILD_TAG_SAFE=${BUILD_TAG_SAFE}" >> $GITHUB_ENV
+          echo "IMAGE_URI=${IMAGE_REPOSITORY}:${BUILD_TAG_SAFE}" >> $GITHUB_ENV
+          echo "display_name=#${GITHUB_RUN_NUMBER} ${BUILD_TAG_SAFE}" >> $GITHUB_ENV
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Check for package.json
+        id: check_node
+        run: |
+          if [ -f "package.json" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install dependencies
+        if: steps.check_node.outputs.found == 'true'
+        run: npm ci
+
+      - name: Lint
+        if: steps.check_node.outputs.found == 'true'
+        run: npm run lint
+
+      - name: Unit Tests
+        if: steps.check_node.outputs.found == 'true'
+        run: npm run test:ci -- --reporters=default --reporters=jest-junit
+
+      - name: Dependency Audit
+        if: steps.check_node.outputs.found == 'true'
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
+      - name: Build Artifact
+        if: steps.check_node.outputs.found == 'true'
+        run: npm run build
+
+      - name: Archive dist
+        if: steps.check_node.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/**
+
+      - name: Check for Dockerfile
+        id: check_docker
+        run: |
+          if [ -f "Dockerfile" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Docker Build
+        if: steps.check_docker.outputs.found == 'true'
+        run: |
+          docker build -t ${{ env.IMAGE_URI }} .
+
+      - name: Security Scan
+        if: steps.check_docker.outputs.found == 'true' && github.event.inputs.RUN_SECURITY_SCAN == 'true'
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 1 --severity HIGH,CRITICAL ${{ env.IMAGE_URI }}
+
+      - name: Docker Login
+        if: steps.check_docker.outputs.found == 'true'
+        run: |
+          echo "${{ secrets.DOCKER_REGISTRY_CREDS }}" | docker login ${{ env.REGISTRY_HOST }} --username ${{ secrets.DOCKER_REGISTRY_USER }} --password-stdin
+
+      - name: Docker Push
+        if: steps.check_docker.outputs.found == 'true'
+        run: |
+          docker push ${{ env.IMAGE_URI }}
+          docker tag ${{ env.IMAGE_URI }} ${{ env.IMAGE_REPOSITORY }}:latest
+          docker push ${{ env.IMAGE_REPOSITORY }}:latest
+
+      - name: Deploy
+        if: steps.check_docker.outputs.found == 'true' && (github.event.inputs.RUN_DEPLOY == 'true' || github.event.inputs.RUN_DEPLOY == true)
+        env:
+          TARGET_ENV: ${{ github.event.inputs.TARGET_ENV || 'dev' }}
+          DEPLOY_STRATEGY: ${{ github.event.inputs.DEPLOY_STRATEGY || 'rolling' }}
+          CANARY_WEIGHT: ${{ github.event.inputs.CANARY_WEIGHT || '10' }}
+        run: |
+          KUBECONFIG_SECRET_NAME=$(printf "KUBECONFIG-%s" "${TARGET_ENV}")
+          KUBECONFIG_CONTENT="${{ secrets[format('KUBECONFIG-{0}', github.event.inputs.TARGET_ENV || 'dev')] }}"
+          if [ -z "$KUBECONFIG_CONTENT" ]; then
+            echo "No kubeconfig secret found for environment $TARGET_ENV, skipping deploy."
+            exit 0
+          fi
+          mkdir -p $HOME/.kube
+          echo "$KUBECONFIG_CONTENT" > $HOME/.kube/config
+          export KUBECONFIG=$HOME/.kube/config
+          kubectl config use-context "${TARGET_ENV}"
+          kubectl set image deployment/payments-api payments-api=${{ env.IMAGE_URI }} -n "${{ env.NAMESPACE_BASE }}-${TARGET_ENV}"
+          kubectl rollout status deployment/payments-api -n "${{ env.NAMESPACE_BASE }}-${TARGET_ENV}" --timeout=420s
+          if [ "${DEPLOY_STRATEGY}" = "canary" ]; then
+            kubectl patch deployment payments-api -n "${{ env.NAMESPACE_BASE }}-${TARGET_ENV}" --type='merge' -p "{\"spec\":{\"replicas\":10}}"
+            kubectl annotate deployment payments-api -n "${{ env.NAMESPACE_BASE }}-${TARGET_ENV}" canary-weight="${CANARY_WEIGHT}" --overwrite
+          fi
+
+      - name: Smoke Tests
+        if: steps.check_docker.outputs.found == 'true' && (github.event.inputs.RUN_DEPLOY == 'true' || github.event.inputs.RUN_DEPLOY == true)
+        env:
+          TARGET_ENV: ${{ github.event.inputs.TARGET_ENV || 'dev' }}
+        run: |
+          URL="https://payments-${TARGET_ENV}.example.com/healthz"
+          RETRIES=5
+          SLEEP=8
+          for i in $(seq 1 $RETRIES); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
+            if [ "$STATUS" = "200" ]; then
+              echo "Smoke test passed"
+              exit 0
+            fi
+            echo "Smoke test attempt $i failed, retrying in $SLEEP seconds..."
+            sleep $SLEEP
+          done
+          echo "Smoke test failed after $RETRIES attempts"
+          exit 1
+
+      - name: Notify Build
+        if: always()
+        env:
+          TARGET_ENV: ${{ github.event.inputs.TARGET_ENV || 'dev' }}
+          DEPLOY_STRATEGY: ${{ github.event.inputs.DEPLOY_STRATEGY || 'rolling' }}
+        run: |
+          echo "Build notification for $APP_NAME to $SLACK_CHANNEL"
+          echo "Environment: $TARGET_ENV"
+          echo "Image: ${{ env.IMAGE_URI }}"
+          echo "Strategy: $DEPLOY_STRATEGY"
+          # Add Slack notification logic here
+
+      - name: Clean Workspace
+        if: always()
+        run: |
+          rm -rf dist node_modules .npm .github .git Dockerfile package*.json || true
